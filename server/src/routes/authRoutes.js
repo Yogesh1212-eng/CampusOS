@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 
-const { registerUser, loginUser,getMe } = require("../controllers/authController");
+const { registerUser, loginUser,getMe, updateUserRole } = require("../controllers/authController");
 
 const { protect } = require("../middleware/authMiddleware");
 
@@ -26,5 +26,29 @@ router.get(
         });
     }
 );
+
+
+router.get(
+    "/super-admin-test",
+    protect,
+    authorizeRoles("super_admin"),
+    (req, res) => {
+        res.status(200).json({
+            success: true,
+            message: "Super Admin access granted",
+            user: req.user
+        });
+    }
+);
+
+
+router.patch(
+    "/users/:userId/role",
+    protect,
+    authorizeRoles("super_admin"),
+    updateUserRole
+);
+
+
 
 module.exports = router;

@@ -180,4 +180,76 @@ const getMe = async (req, res) => {
     }
 };
 
-module.exports = { registerUser, loginUser,getMe };
+
+
+const updateUserRole = async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { role } = req.body;
+
+        const allowedRoles = [
+            "student",
+            "faculty",
+            "club_admin",
+            "admin"
+        ];
+
+        // Validate the requested role
+        if (!allowedRoles.includes(role)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid role. Super Admin role cannot be assigned through this endpoint."
+            });
+        }
+
+        // Find the target user
+        const user = await User.findById(userId);
+
+        if (!user) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found"
+            });
+        }
+        
+        // Prevent changing the Super Admin account's role
+        if (user.role === "super_admin") {
+            return res.status(403).json({
+                success: false,
+                message: "Super Admin role cannot be changed through this endpoint"
+            });
+        }
+
+        // Update the user's role
+        user.role = role;
+        await user.save();
+
+        return res.status(200).json({
+            success: true,
+            message: "User role updated successfully",
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        if (error.name === "CastError") {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid user ID"
+            });
+        }
+
+        console.error("Update user role error:", error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: "Failed to update user role"
+        });
+    }
+};
+
+
+module.exports = { registerUser, loginUser,getMe, updateUserRole };
