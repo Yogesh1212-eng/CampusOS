@@ -1,8 +1,8 @@
-
+const otpRateLimiter = require("../middleware/otpRateLimiter");
 const express = require("express");
 const router = express.Router();
 
-const { registerUser, loginUser,getMe, updateUserRole } = require("../controllers/authController");
+const { registerUser, loginUser,getMe, updateUserRole, sendVerificationOTP, verifyEmailOTP } = require("../controllers/authController");
 
 const { protect } = require("../middleware/authMiddleware");
 
@@ -50,5 +50,7 @@ router.patch(
 );
 
 
+router.post("/send-otp", otpRateLimiter, sendVerificationOTP);
+router.post("/verify-otp", otpRateLimiter, verifyEmailOTP);
 
 module.exports = router;
