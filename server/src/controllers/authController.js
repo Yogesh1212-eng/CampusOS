@@ -14,6 +14,10 @@ const {
     getOTPExpiry
 } = require("../services/otpService");
 
+const { OAuth2Client } = require("google-auth-library");
+const googleClient = new OAuth2Client(
+    process.env.GOOGLE_CLIENT_ID
+);
 
 // ========================================
 // REGISTER USER
@@ -516,6 +520,393 @@ const verifyEmailOTP = async (req, res) => {
 
 
 // ========================================
+// FORGOT PASSWORD - SEND OTP
+// ========================================
+
+const forgotPassword = async (req, res) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({
+                success: false,
+                message: "Email is required"
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+
+        const user = await User.findOne({
+            email: normalizedEmail
+        });
+
+        // Do not reveal whether an account exists
+        if (!user || !user.isActive || !user.isEmailVerified) {
+            return res.status(200).json({
+                success: true,
+                message: "If an eligible account exists, a password reset OTP will be sent."
+            });
+        }
+
+        // Check 60-second resend cooldown
+        const existingOTP = await EmailOTP.findOne({
+            email: normalizedEmail,
+            purpose: "password_reset"
+        });
+
+        if (existingOTP) {
+            const timeDifference =
+                Date.now() - existingOTP.createdAt.getTime();
+
+            const cooldownTime = 60 * 1000;
+
+            if (timeDifference < cooldownTime) {
+                const remainingSeconds = Math.ceil(
+                    (cooldownTime - timeDifference) / 1000
+                );
+
+                return res.status(429).json({
+                    success: false,
+                    message: `Please wait ${remainingSeconds} seconds before requesting another OTP.`,
+                    remainingSeconds
+                });
+            }
+        }
+
+        // Generate OTP
+        const otp = generateOTP();
+        const otpHash = hashOTP(otp);
+
+        // Remove previous password reset OTP
+        await EmailOTP.deleteMany({
+            email: normalizedEmail,
+            purpose: "password_reset"
+        });
+
+        // Save new OTP
+        await EmailOTP.create({
+            email: normalizedEmail,
+            otpHash,
+            purpose: "password_reset",
+            expiresAt: getOTPExpiry()
+        });
+
+        try {
+            await sendEmail(
+                normalizedEmail,
+                "CampusOS - Password Reset OTP",
+                `Hello ${user.name},
+
+Your CampusOS password reset OTP is: ${otp}
+
+This OTP is valid for 5 minutes.
+
+Do not share this OTP with anyone.
+
+If you did not request a password reset, please ignore this email.
+
+Regards,
+CampusOS Team`
+            );
+
+        } catch (emailError) {
+            await EmailOTP.deleteMany({
+                email: normalizedEmail,
+                purpose: "password_reset"
+            });
+
+            throw emailError;
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: "If an eligible account exists, a password reset OTP will be sent."
+        });
+
+    } catch (error) {
+        console.error("Forgot Password Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Unable to process password reset request"
+        });
+    }
+};
+
+
+// ========================================
+// RESET PASSWORD USING OTP
+// ========================================
+
+const resetPassword = async (req, res) => {
+    try {
+        const { email, otp, newPassword } = req.body;
+
+        if (!email || !otp || !newPassword) {
+            return res.status(400).json({
+                success: false,
+                message: "Email, OTP and new password are required"
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // Validate OTP format
+        if (!/^\d{6}$/.test(String(otp))) {
+            return res.status(400).json({
+                success: false,
+                message: "Please enter a valid 6-digit OTP"
+            });
+        }
+
+        // Validate new password
+        if (typeof newPassword !== "string" || newPassword.length < 8) {
+            return res.status(400).json({
+                success: false,
+                message: "New password must be at least 8 characters long"
+            });
+        }
+
+        // Find password reset OTP
+        const otpRecord = await EmailOTP.findOne({
+            email: normalizedEmail,
+            purpose: "password_reset"
+        });
+
+        if (!otpRecord) {
+            return res.status(400).json({
+                success: false,
+                message: "OTP not found. Please request a new OTP."
+            });
+        }
+
+        // Check OTP expiry
+        if (otpRecord.expiresAt < new Date()) {
+            await EmailOTP.deleteOne({
+                _id: otpRecord._id
+            });
+
+            return res.status(400).json({
+                success: false,
+                message: "OTP has expired. Please request a new OTP."
+            });
+        }
+
+        // Maximum five attempts
+        if (otpRecord.attempts >= 5) {
+            await EmailOTP.deleteOne({
+                _id: otpRecord._id
+            });
+
+            return res.status(429).json({
+                success: false,
+                message: "Maximum OTP attempts exceeded. Please request a new OTP."
+            });
+        }
+
+        // Compare OTP hashes safely
+        const enteredOTPHash = hashOTP(String(otp));
+
+        const storedHashBuffer = Buffer.from(
+            otpRecord.otpHash,
+            "hex"
+        );
+
+        const enteredHashBuffer = Buffer.from(
+            enteredOTPHash,
+            "hex"
+        );
+
+        const isOTPValid =
+            storedHashBuffer.length === enteredHashBuffer.length &&
+            crypto.timingSafeEqual(
+                storedHashBuffer,
+                enteredHashBuffer
+            );
+
+        if (!isOTPValid) {
+            otpRecord.attempts += 1;
+            await otpRecord.save();
+
+            return res.status(400).json({
+                success: false,
+                message: "Incorrect OTP",
+                attemptsRemaining: 5 - otpRecord.attempts
+            });
+        }
+
+        // Find eligible user
+        const user = await User.findOne({
+            email: normalizedEmail
+        });
+
+        if (!user || !user.isActive || !user.isEmailVerified) {
+            await EmailOTP.deleteOne({
+                _id: otpRecord._id
+            });
+
+            return res.status(400).json({
+                success: false,
+                message: "Unable to reset password for this account"
+            });
+        }
+
+        // Hash and update new password
+        user.password = await bcrypt.hash(newPassword, 12);
+        await user.save();
+
+        // Delete used password reset OTP
+        await EmailOTP.deleteMany({
+            email: normalizedEmail,
+            purpose: "password_reset"
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Password reset successfully. Please log in with your new password."
+        });
+
+    } catch (error) {
+        console.error("Reset Password Error:", error);
+
+        return res.status(500).json({
+            success: false,
+            message: "Server error while resetting password"
+        });
+    }
+};
+
+
+// ========================================
+// GOOGLE LOGIN
+// ========================================
+
+const googleLogin = async (req, res) => {
+    try {
+        const { idToken } = req.body;
+
+        if (!idToken) {
+            return res.status(400).json({
+                success: false,
+                message: "Google ID token is required"
+            });
+        }
+
+        // Verify Google ID token
+        const ticket = await googleClient.verifyIdToken({
+            idToken: idToken,
+            audience: process.env.GOOGLE_CLIENT_ID
+        });
+
+        const payload = ticket.getPayload();
+
+        const {
+            sub: googleId,
+            email,
+            name,
+            picture,
+            email_verified
+        } = payload;
+
+        // Verify Google's email verification status
+        if (!email || !email_verified) {
+            return res.status(401).json({
+                success: false,
+                message: "Google email is not verified"
+            });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+
+        // Find existing account using Google ID
+        let user = await User.findOne({
+            googleId: googleId
+        });
+
+        // If not found, check using email
+        if (!user) {
+            user = await User.findOne({
+                email: normalizedEmail
+            });
+
+            if (user) {
+                // Prevent linking a different Google account
+                if (user.googleId && user.googleId !== googleId) {
+                    return res.status(409).json({
+                        success: false,
+                        message: "This email is already linked to another Google account"
+                    });
+                }
+
+                // Link Google account with existing CampusOS account
+                user.googleId = googleId;
+                user.isEmailVerified = true;
+
+                if (!user.profilePicture && picture) {
+                    user.profilePicture = picture;
+                }
+
+                await user.save();
+            }
+        }
+
+        // Create new account if user does not exist
+        if (!user) {
+            user = await User.create({
+                name: name || "CampusOS User",
+                email: normalizedEmail,
+                googleId: googleId,
+                profilePicture: picture || "",
+                role: "student",
+                isEmailVerified: true
+            });
+        }
+
+        // Check account status
+        if (!user.isActive) {
+            return res.status(403).json({
+                success: false,
+                message: "Your account has been deactivated"
+            });
+        }
+
+        // Generate CampusOS access token
+        const accessToken = jwt.sign(
+            {
+                id: user._id,
+                role: user.role
+            },
+            process.env.JWT_ACCESS_SECRET,
+            {
+                expiresIn: "15m"
+            }
+        );
+
+        return res.status(200).json({
+            success: true,
+            message: "Google login successful",
+            accessToken,
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                profilePicture: user.profilePicture
+            }
+        });
+
+    } catch (error) {
+        console.error("Google Login Error:", error.message);
+
+        return res.status(401).json({
+            success: false,
+            message: "Google authentication failed"
+        });
+    }
+};
+
+
+// ========================================
 // GET LOGGED-IN USER
 // ========================================
 
@@ -611,6 +1002,9 @@ module.exports = {
     loginUser,
     sendVerificationOTP,
     verifyEmailOTP,
+    forgotPassword,
+    resetPassword,
+    googleLogin,
     getMe,
     updateUserRole
 };
