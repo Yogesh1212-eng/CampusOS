@@ -9,6 +9,7 @@ const {
     verifyEmailOTP,
     forgotPassword,
     resetPassword,
+    googleLogin,
     getMe,
     updateUserRole
 } = require("../controllers/authController");
@@ -21,6 +22,7 @@ const authorizeRoles = require("../middleware/authorizeRoles");
 // POST /api/auth/register
 router.post("/register", registerUser);
 router.post("/login", loginUser);
+router.post("/google", googleLogin);
 router.get("/me", protect, getMe);
 
 // Temporary Admin-only testing route
@@ -65,5 +67,6 @@ router.post("/verify-otp", otpRateLimiter, verifyEmailOTP);
 
 router.post("/forgot-password", otpRateLimiter, forgotPassword);
 router.post("/reset-password", otpRateLimiter, resetPassword);
+
 
 module.exports = router;
